@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""MEXC Density Scanner v5.0"""
+"""MEXC Density Scanner v5.1"""
 import io, time, zipfile, math
 from datetime import datetime
 from collections import Counter
@@ -117,35 +117,78 @@ def analyze_robots(trades_raw):
     }
 
 
-def get_trades_5m_count(client, symbol):
-    """Получить кол-во сделок за последние 5 минут из klines"""
+def count_trades_5m(client, symbol):
+    """Получить кол-во сделок за ~5 минут через recent trades"""
     try:
+        # Способ 1: klines 5m — поле trades (index 8)
         kl = client.get_klines(symbol, "5m", 1)
         if kl and isinstance(kl, list) and len(kl) > 0:
             last = kl[-1]
             if isinstance(last, (list, tuple)) and len(last) > 8:
-                return si(last[8])
+                cnt = si(last[8])
+                if cnt > 0:
+                    return cnt
+
+        # Способ 2: recent trades — считаем за последние 5 мин
+        trades = client.get_recent_trades(symbol, 500)
+        if trades and isinstance(trades, list) and len(trades) > 0:
+            now_ms = time.time() * 1000
+            cutoff = now_ms - 5 * 60 * 1000  # 5 минут назад
+            cnt = 0
+            for t in trades:
+                ts = sf(t.get("time", 0))
+                if ts >= cutoff:
+                    cnt += 1
+            if cnt > 0:
+                return cnt
+
         return 0
     except:
         return 0
 
 
-# ======= Charts - v5.0 dual Y-axis =======
-BID_COLOR = "rgba(0,200,83,0.7)"
-ASK_COLOR = "rgba(255,23,68,0.7)"
-BID_CANDLE = "#00c853"
+def count_trades_5m_from_recent(trades_raw):
+    """Подсчёт сделок за последние 5 мин из уже загруженных trades"""
+    if not trades_raw or not isinstance(trades_raw, list):
+        return 0
+    now_ms = time.time() * 1000
+    cutoff = now_ms - 5 * 60 * 1000
+    cnt = 0
+    for t in trades_raw:
+        ts = sf(t.get("time", 0))
+        if ts >= cutoff:
+            cnt += 1
+    return cnt
+
+
+# ═══════════════════════════════════════════════════
+# CHARTS — яркие цвета как в начальной версии
+# ═══════════════════════════════════════════════════
+# FIX #1: Яркие, насыщенные цвета для стакана и хитмапа
+BID_COLOR = "rgba(0,230,118,0.9)"     # Ярко-зелёный
+ASK_COLOR = "rgba(255,23,68,0.9)"     # Ярко-красный
+BID_CANDLE = "#00e676"
 ASK_CANDLE = "#ff1744"
 PRICE_LINE = "#00d2ff"
 
 
+def _plotly_price_tickformat(price):
+    """FIX #5: Формат оси Y для мелких чисел — без SI-нотации (μ, m, n)"""
+    if price >= 1000:
+        return ",.0f"
+    if price >= 1:
+        return ".2f"
+    if price >= 0.01:
+        return ".4f"
+    if price >= 0.0001:
+        return ".6f"
+    if price >= 0.00000001:
+        return ".8f"
+    return ".10f"
+
+
 def build_candlestick_dual(df, symbol, interval, cur_price=None):
-    """
-    Свечной график с двойной Y-осью:
-      - Левая: цена
-      - Правая: отклонение в % от текущей цены
-      - Нулевая линия подсвечена
-      - Внизу объёмы
-    """
+    """Свечной график: левая Y = цена, правая Y = отклонение %, внизу объёмы"""
     if df is None or df.empty or len(df) < 2:
         return None
     try:
@@ -158,7 +201,6 @@ def build_candlestick_dual(df, symbol, interval, cur_price=None):
             vertical_spacing=0.03, row_heights=[0.75, 0.25],
             specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
 
-        # Свечи — на основную ось (левая, цена)
         fig.add_trace(go.Candlestick(
             x=df["time"], open=df["open"], high=df["high"],
             low=df["low"], close=df["close"],
@@ -166,7 +208,6 @@ def build_candlestick_dual(df, symbol, interval, cur_price=None):
             decreasing_line_color=ASK_CANDLE,
             name="Price"), row=1, col=1, secondary_y=False)
 
-        # Невидимая линия для правой оси — % отклонение
         pct_vals = [(float(c) - ref_price) / ref_price * 100 for c in df["close"]]
         fig.add_trace(go.Scatter(
             x=df["time"], y=pct_vals,
@@ -174,7 +215,6 @@ def build_candlestick_dual(df, symbol, interval, cur_price=None):
             showlegend=False, hoverinfo="skip",
             name="% dev"), row=1, col=1, secondary_y=True)
 
-        # Объёмы
         colors = [BID_CANDLE if c >= o else ASK_CANDLE
                   for c, o in zip(df["close"], df["open"])]
         fig.add_trace(go.Bar(
@@ -182,22 +222,19 @@ def build_candlestick_dual(df, symbol, interval, cur_price=None):
             marker_color=colors, opacity=0.5,
             name="Vol"), row=2, col=1)
 
-        # Текущая цена
         if cur_price and cur_price > 0:
             fig.add_hline(
                 y=float(cur_price), line_dash="dot",
                 line_color=PRICE_LINE, line_width=1.5,
-                annotation_text=f"  {cur_price:.8g}",
+                annotation_text=f"  {fmt_price(cur_price)}",
                 annotation_font_color=PRICE_LINE,
                 annotation_font_size=11,
                 row=1, col=1)
 
-        # Нулевая линия на правой оси
         fig.add_hline(
-            y=0, line_dash="solid", line_color="rgba(255,255,255,0.4)",
-            line_width=1, row=1, col=1, secondary_y=True)
+            y=0, line_dash="solid", line_color="rgba(255,255,0,0.5)",
+            line_width=1.5, row=1, col=1, secondary_y=True)
 
-        # Диапазоны правой оси — по данным
         price_min = float(df["low"].min())
         price_max = float(df["high"].max())
         pct_min = (price_min - ref_price) / ref_price * 100
@@ -205,16 +242,21 @@ def build_candlestick_dual(df, symbol, interval, cur_price=None):
         pct_abs = max(abs(pct_min), abs(pct_max), 0.5)
         pct_margin = pct_abs * 1.15
 
+        # FIX #5: явный формат для оси цены — без μ/m/n
+        tfmt = _plotly_price_tickformat(ref_price)
+
         fig.update_layout(
             title=f"{symbol}  •  {interval}",
             template="plotly_dark",
             height=480,
             xaxis_rangeslider_visible=False,
             showlegend=False,
-            margin=dict(l=60, r=60, t=45, b=20))
+            margin=dict(l=70, r=70, t=45, b=20))
 
         fig.update_yaxes(
             title_text="Цена", side="left",
+            tickformat=tfmt,
+            exponentformat="none",
             row=1, col=1, secondary_y=False)
         fig.update_yaxes(
             title_text="Откл. %", side="right",
@@ -232,9 +274,15 @@ def build_candlestick_dual(df, symbol, interval, cur_price=None):
 
 
 def build_orderbook_chart(bids, asks, cur_price, depth=50):
+    """FIX #1: яркие цвета + FIX #5: нормальные цены на оси Y"""
     try:
         b, a = bids[:depth], asks[:depth]
         if not b and not a: return None
+
+        # FIX #5: формат цены для оси Y
+        ref = cur_price if cur_price and cur_price > 0 else (b[0][0] if b else a[0][0])
+        tfmt = _plotly_price_tickformat(ref)
+
         fig = go.Figure()
         if b:
             fig.add_trace(go.Bar(
@@ -242,30 +290,37 @@ def build_orderbook_chart(bids, asks, cur_price, depth=50):
                 x=[float(p * q) for p, q in b],
                 orientation="h", name="BID",
                 marker_color=BID_COLOR,
-                hovertemplate="%{y:.8g}<br>$%{x:,.0f}<extra>BID</extra>"))
+                marker_line_color="rgba(0,255,150,1)",
+                marker_line_width=0.5,
+                hovertemplate="%{y}<br>$%{x:,.0f}<extra>BID</extra>"))
         if a:
             fig.add_trace(go.Bar(
                 y=[float(p) for p, q in a],
                 x=[float(p * q) for p, q in a],
                 orientation="h", name="ASK",
                 marker_color=ASK_COLOR,
-                hovertemplate="%{y:.8g}<br>$%{x:,.0f}<extra>ASK</extra>"))
+                marker_line_color="rgba(255,80,80,1)",
+                marker_line_width=0.5,
+                hovertemplate="%{y}<br>$%{x:,.0f}<extra>ASK</extra>"))
         if cur_price and float(cur_price) > 0:
             fig.add_hline(y=float(cur_price), line_dash="dot",
                           line_color=PRICE_LINE, line_width=2,
-                          annotation_text=f"  {float(cur_price):.8g}",
+                          annotation_text=f"  {fmt_price(float(cur_price))}",
                           annotation_font_color=PRICE_LINE)
         fig.update_layout(
             xaxis_title="$ USDT", yaxis_title="",
             template="plotly_dark",
             height=max(500, depth * 12),
             barmode="relative", showlegend=True,
-            margin=dict(l=80, r=20, t=40, b=30))
+            margin=dict(l=90, r=20, t=40, b=30))
+        fig.update_yaxes(tickformat=tfmt, exponentformat="none")
         return fig
     except:
         return None
 
+
 def build_heatmap(bids, asks, cur_price, depth=30):
+    """FIX #1: яркие цвета + FIX #5: нормальные цены"""
     try:
         levels = []
         for p, q in bids[:depth]:
@@ -276,33 +331,44 @@ def build_heatmap(bids, asks, cur_price, depth=30):
         levels.sort(key=lambda x: x[1])
         mx = max(v for _, _, v in levels)
         if mx <= 0: mx = 1.0
+
+        ref = cur_price if cur_price and cur_price > 0 else levels[0][1]
+        tfmt = _plotly_price_tickformat(ref)
+
         prices, vols, colors, hovers = [], [], [], []
         for side, price, vol in levels:
             intensity = min(float(vol) / float(mx), 1.0)
             prices.append(price)
             vols.append(vol)
             if side == "BID":
-                g = int(80 + 175 * intensity)
-                c = f"rgba(0,{g},83,0.85)"
+                # FIX #1: намного ярче — от зелёного до ярко-зелёного
+                g = int(130 + 125 * intensity)
+                c = f"rgba(0,{g},60,0.95)"
             else:
-                r = int(80 + 175 * intensity)
-                gb = int(60 * (1.0 - intensity))
-                c = f"rgba({r},{gb},68,0.85)"
+                # FIX #1: от красного до ярко-красного
+                r = int(130 + 125 * intensity)
+                c = f"rgba({r},20,40,0.95)"
             colors.append(c)
-            hovers.append(f"{side}: ${vol:,.0f} @ {price:.8g}")
+            hovers.append(f"{side}: ${vol:,.0f} @ {fmt_price(price)}")
         fig = go.Figure(go.Bar(
             y=prices, x=vols, orientation="h",
-            marker_color=colors, hovertext=hovers,
+            marker_color=colors,
+            marker_line_color=[
+                "rgba(0,255,150,0.6)" if s == "BID" else "rgba(255,100,100,0.6)"
+                for s, _, _ in levels],
+            marker_line_width=0.5,
+            hovertext=hovers,
             hoverinfo="text", showlegend=False))
         if cur_price and float(cur_price) > 0:
             fig.add_hline(y=float(cur_price), line_dash="dot",
                           line_color=PRICE_LINE, line_width=2,
-                          annotation_text=f"  {float(cur_price):.8g}",
+                          annotation_text=f"  {fmt_price(float(cur_price))}",
                           annotation_font_color=PRICE_LINE)
         fig.update_layout(
             template="plotly_dark", height=500,
             yaxis_title="", xaxis_title="$ USDT",
-            margin=dict(l=80, r=20, t=40, b=30))
+            margin=dict(l=90, r=20, t=40, b=30))
+        fig.update_yaxes(tickformat=tfmt, exponentformat="none")
         return fig
     except:
         return None
@@ -339,7 +405,7 @@ def run_scan(min_vol, max_vol, min_spread, wall_mult, min_wall_usd, top_n):
         if not ok:
             st.error(f"MEXC API: {msg}")
             progress.empty(); return
-    progress.progress(3, "Pairs...")
+    progress.progress(3, "Пары...")
     try:
         info = client.get_exchange_info()
     except Exception as e:
@@ -371,12 +437,12 @@ def run_scan(min_vol, max_vol, min_spread, wall_mult, min_wall_usd, top_n):
             except:
                 continue
     if not all_sym:
-        st.error("0 par"); progress.empty(); return
+        st.error("0 пар"); progress.empty(); return
     progress.progress(5)
     try:
         tickers = client.get_all_tickers_24h()
     except:
-        st.error("Tickers error"); progress.empty(); return
+        st.error("Ошибка тикеров"); progress.empty(); return
     if not tickers:
         st.error(str(client.last_error)); progress.empty(); return
     tm = {t["symbol"]: t for t in tickers if "symbol" in t}
@@ -386,11 +452,11 @@ def run_scan(min_vol, max_vol, min_spread, wall_mult, min_wall_usd, top_n):
     cands.sort(key=lambda x: sf(x[1].get("quoteVolume", 0)), reverse=True)
     if not cands:
         st.warning("0 в диапазоне"); progress.empty(); return
-    progress.progress(15, f"{len(cands)}...")
+    progress.progress(15, f"{len(cands)} кандидатов...")
     results, total = [], len(cands)
     for i, (sym, tk) in enumerate(cands):
         if st.session_state.cancel_scan:
-            st.warning(f"Stop {i}/{total}"); break
+            st.warning(f"Стоп {i}/{total}"); break
         try:
             book = client.get_order_book(sym, cfg.ORDER_BOOK_DEPTH)
             if book:
@@ -403,31 +469,30 @@ def run_scan(min_vol, max_vol, min_spread, wall_mult, min_wall_usd, top_n):
             pass
         if (i + 1) % 8 == 0 or i == total - 1:
             progress.progress(
-                15 + int((i + 1) / total * 80),
-                f"{i + 1}/{total} -> {len(results)}")
+                15 + int((i + 1) / total * 75),
+                f"{i + 1}/{total} → {len(results)} найдено")
     results.sort(key=lambda r: r.score, reverse=True)
     top = results[:top_n]
-    progress.progress(92, "Обогащение данных...")
+    progress.progress(90, "Обогащение данных...")
 
-    # Обогащаем top результаты: trade_count_24h + trades_5m
+    # FIX #3: Обогащаем — trade_count_24h + trades_5m (два метода)
     for idx, r in enumerate(top[:30]):
         try:
-            # 24h trade count
             if r.trade_count_24h == 0:
                 single_tk = client.get_ticker_24h(r.symbol)
                 tc = extract_tc(single_tk)
                 if tc > 0:
                     r.trade_count_24h = tc
 
-            # 5m trade count из klines
-            trades5 = get_trades_5m_count(client, r.symbol)
+            # Считаем сделки 5м — через klines + fallback recent trades
+            trades5 = count_trades_5m(client, r.symbol)
             r._trades_5m = trades5
         except:
             if not hasattr(r, '_trades_5m'):
                 r._trades_5m = 0
         if (idx + 1) % 5 == 0:
             progress.progress(
-                92 + int((idx + 1) / min(len(top), 30) * 6),
+                90 + int((idx + 1) / min(len(top), 30) * 8),
                 f"Обогащение {idx + 1}/{min(len(top), 30)}")
 
     st.session_state.tracker.update(top)
@@ -435,12 +500,14 @@ def run_scan(min_vol, max_vol, min_spread, wall_mult, min_wall_usd, top_n):
     st.session_state.last_scan = time.time()
     st.session_state.total_pairs = total
     st.session_state.cancel_scan = False
-    progress.progress(100, "OK!")
-    time.sleep(0.2)
+    progress.progress(100, "Готово!")
+    time.sleep(0.3)
     progress.empty()
 
 
-# ======= Sidebar =======
+# ═══════════════════════════════════════════════════
+# SIDEBAR
+# ═══════════════════════════════════════════════════
 import config as cfg_module
 TF_MULT = cfg_module.VOLUME_TIMEFRAMES
 
@@ -495,6 +562,76 @@ with st.sidebar:
         "🔍 СКАН", use_container_width=True, type="primary")
     if c2s.button("⛔ СТОП", use_container_width=True):
         st.session_state.cancel_scan = True
+
+    # ── FIX #4: 📦 Скачать ВСЁ в сайдбаре ──
+    st.markdown("---")
+    st.markdown("**📦 Экспорт**")
+
+    def _build_full_zip():
+        """Собирает ВСЕ данные в один ZIP"""
+        buf = io.BytesIO()
+        results = st.session_state.scan_results
+        tracker = st.session_state.tracker
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            # 1. Результаты скана
+            if results:
+                scan_rows = []
+                for r in results:
+                    if not r.all_walls:
+                        continue
+                    bt = max(r.bid_walls, key=lambda w: w.size_usdt) if r.bid_walls else None
+                    at = max(r.ask_walls, key=lambda w: w.size_usdt) if r.ask_walls else None
+                    scan_rows.append({
+                        "Score": r.score, "Symbol": r.symbol,
+                        "Spread%": round(r.spread_pct, 2),
+                        "Vol24h$": round(r.volume_24h_usdt),
+                        "Trades24h": r.trade_count_24h,
+                        "Trades5m": getattr(r, '_trades_5m', 0),
+                        "BID$": round(bt.size_usdt) if bt else 0,
+                        "BIDx": bt.multiplier if bt else 0,
+                        "ASK$": round(at.size_usdt) if at else 0,
+                        "ASKx": at.multiplier if at else 0,
+                    })
+                if scan_rows:
+                    zf.writestr("scan_results.csv",
+                                pd.DataFrame(scan_rows).to_csv(index=False))
+            # 2. Переставки
+            movers = tracker.get_active_movers(86400)
+            if movers:
+                mr = []
+                for e in movers:
+                    mr.append({
+                        "Time": datetime.fromtimestamp(e.timestamp).strftime("%Y-%m-%d %H:%M:%S"),
+                        "Symbol": e.symbol, "Side": e.side,
+                        "Volume$": round(e.size_usdt),
+                        "OldPrice": e.old_price, "NewPrice": e.new_price,
+                        "Shift%": e.shift_pct, "Dir": e.direction,
+                    })
+                zf.writestr("movers.csv",
+                            pd.DataFrame(mr).to_csv(index=False))
+            # 3. Метаданные
+            stats = tracker.get_stats()
+            meta = {
+                "exported": datetime.now().isoformat(),
+                "total_scans": stats["total_scans"],
+                "total_movers": stats["total_mover_events"],
+                "pairs_tracked": stats["total_pairs_tracked"],
+            }
+            import json
+            zf.writestr("meta.json", json.dumps(meta, indent=2))
+        buf.seek(0)
+        return buf.getvalue()
+
+    if st.session_state.scan_results:
+        st.download_button(
+            "📦 Скачать ВСЁ (ZIP)",
+            data=_build_full_zip(),
+            file_name=f"mexc_full_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+            mime="application/zip",
+            use_container_width=True)
+    else:
+        st.caption("Сначала запусти скан")
+
     st.markdown("---")
     with st.expander("🚫 Чёрный список"):
         bl_inp = st.text_input(
@@ -552,9 +689,9 @@ if need_scan:
              min_wall_usd, top_n)
 
 
-# ══════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
 # НАВИГАЦИЯ — 3 кнопки-таба с эмодзи и названиями
-# ══════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
 TAB_LABELS = [
     "📊 Сканер",
     "🔍 Стакан",
@@ -562,7 +699,6 @@ TAB_LABELS = [
 ]
 cp = st.session_state.current_page
 
-# Стилизованные кнопки навигации
 st.markdown("""
 <style>
 div[data-testid="stHorizontalBlock"] > div > div > button {
@@ -620,14 +756,13 @@ if page == 0:
                         break
                 if not tw_big:
                     tw_big = tw_list[0]
-            lt_s = tw_big.lifetime_sec if tw_big else 0
             lt_str = tw_big.lifetime_str if tw_big else "---"
             bt = (max(r.bid_walls, key=lambda w: w.size_usdt)
                   if r.bid_walls else None)
             at = (max(r.ask_walls, key=lambda w: w.size_usdt)
                   if r.ask_walls else None)
 
-            # Кол-во сделок за 5 минут
+            # FIX #3: Кол-во сделок за 5 минут
             trades_5m = getattr(r, '_trades_5m', 0)
 
             rows.append({
@@ -635,11 +770,10 @@ if page == 0:
                 "Пара": r.symbol,
                 "Спред%": round(r.spread_pct, 2),
                 "Об24ч$": round(r.volume_24h_usdt),
-                "Сд24ч": (r.trade_count_24h
-                           if r.trade_count_24h > 0 else 0),
+                "Сд24ч": r.trade_count_24h if r.trade_count_24h > 0 else "—",
                 "BID$": round(bt.size_usdt) if bt else 0,
                 "BIDx": bt.multiplier if bt else 0,
-                "Сд5м": trades_5m,
+                "Сд5м": trades_5m if trades_5m > 0 else "—",
                 "ASK$": round(at.size_usdt) if at else 0,
                 "ASKx": at.multiplier if at else 0,
                 "ASK%": at.distance_pct if at else 0,
@@ -650,7 +784,8 @@ if page == 0:
             df = df.sort_values("Скор", ascending=False)
             df = df.reset_index(drop=True)
             st.caption(
-                "Кликни на заголовок столбца для сортировки")
+                "Кликни на заголовок столбца для сортировки. "
+                "Сд5м = сделки за последние 5 мин.")
             st.dataframe(df, hide_index=True,
                          use_container_width=True,
                          height=min(len(df) * 35 + 40, 700))
@@ -674,8 +809,10 @@ if page == 0:
                     if chosen and st.button("→", key="go_ch"):
                         go_detail(chosen)
                         st.rerun()
+
+            # FIX #4: Кнопка экспорта скана
             st.download_button(
-                "📥 Скачать CSV", data=make_csv(df),
+                "📥 Результаты скана CSV", data=make_csv(df),
                 file_name=f"scan_{datetime.now().strftime('%H%M')}.csv",
                 mime="text/csv")
 
@@ -733,7 +870,6 @@ elif page == 1:
             book_raw = client.get_order_book(symbol, 500)
             ticker_raw = client.get_ticker_24h(symbol)
             trades_raw = client.get_recent_trades(symbol, 1000)
-            # Загрузка всех таймфреймов свечей
             klines_data = {}
             for tf_key, tf_cfg in cfg_module.CHART_INTERVALS.items():
                 kl_raw = client.get_klines(symbol, tf_cfg["api"], tf_cfg["limit"])
@@ -773,28 +909,37 @@ elif page == 1:
     vol24 = sf(td.get("quoteVolume", 0))
 
     df_5m = klines_data.get("5m", pd.DataFrame())
+    df_1m = klines_data.get("1m", pd.DataFrame())
     df_1h = klines_data.get("1h", pd.DataFrame())
 
     st.markdown(
         f"### {symbol}  •  {fmt_price(mid)}  •  "
         f"[MEXC ↗]({mexc_link(symbol)})")
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    # FIX #6: показать объём и кол-во сделок за 5мин в метриках
+    s5 = kline_stats(df_5m, 1)
+    s4h = kline_stats(df_1h, 4)
+    trades_5m_cnt = count_trades_5m_from_recent(trades_raw)
+    if trades_5m_cnt == 0:
+        trades_5m_cnt = s5["trades"]
+
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
     m1.metric("Спред", f"{spread:.2f}%")
     m2.metric("Bid $", f"${bdepth:,.0f}")
     m3.metric("Ask $", f"${adepth:,.0f}")
-    m4.metric("Сделки 24ч", f"{tc24:,}" if tc24 else "---")
-    m5.metric("Объём 24ч", f"${vol24:,.0f}")
-    s4h = kline_stats(df_1h, 4)
-    m6.metric("Объём 4ч", f"${s4h['volume']:,.0f}")
+    m4.metric("Сд. 5м", f"{trades_5m_cnt:,}" if trades_5m_cnt else "—",
+              f"${s5['volume']:,.0f}")
+    m5.metric("Сделки 24ч", f"{tc24:,}" if tc24 else "—")
+    m6.metric("Объём 24ч", f"${vol24:,.0f}")
+    m7.metric("Объём 4ч", f"${s4h['volume']:,.0f}")
 
     # ── Графики с выбором таймфрейма ──
     st.markdown("#### 📈 График цены")
     chart_tf_labels = list(cfg_module.CHART_INTERVALS.keys())
-    # Кнопки выбора таймфрейма
     tf_cols = st.columns(len(chart_tf_labels))
+    # FIX #2: по умолчанию 5m
     if "chart_tf" not in st.session_state:
-        st.session_state.chart_tf = "1h"
+        st.session_state.chart_tf = "5m"
     for i, tf_lbl in enumerate(chart_tf_labels):
         with tf_cols[i]:
             btype = "primary" if st.session_state.chart_tf == tf_lbl else "secondary"
@@ -854,12 +999,11 @@ elif page == 1:
 
     # ── Объёмы по таймфреймам ──
     st.markdown("#### 📊 Объёмы и сделки")
-    s5 = kline_stats(df_5m, 1)
     s15 = kline_stats(df_5m, 3)
     s60 = kline_stats(df_5m, 12)
     vc = st.columns(5)
     vc[0].metric("5м", f"${s5['volume']:,.0f}",
-                 f"{s5['trades']} сд.")
+                 f"{trades_5m_cnt} сд.")
     vc[1].metric("15м", f"${s15['volume']:,.0f}",
                  f"{s15['trades']} сд.")
     vc[2].metric("1ч", f"${s60['volume']:,.0f}",
@@ -909,6 +1053,7 @@ elif page == 1:
             st.plotly_chart(fh, use_container_width=True)
 
     # ── Последние сделки ──
+    trades_df_rows = []
     if trades_raw and isinstance(trades_raw, list):
         st.markdown("#### 🕐 Последние сделки")
         trs = []
@@ -918,14 +1063,21 @@ elif page == 1:
                 q = sf(t.get("qty", 0))
                 ts = sf(t.get("time", 0))
                 is_buy = not t.get("isBuyerMaker", True)
+                time_str = (pd.to_datetime(ts, unit="ms")
+                            .strftime("%H:%M:%S") if ts > 0 else "---")
                 trs.append({
-                    "Время": (pd.to_datetime(ts, unit="ms")
-                               .strftime("%H:%M:%S")
-                               if ts > 0 else "---"),
+                    "Время": time_str,
                     "Цена": fmt_price(p),
                     "Кол-во": q,
                     "$": round(p * q, 2),
                     "Тип": is_buy,
+                })
+                trades_df_rows.append({
+                    "Time": time_str,
+                    "Price": p,
+                    "Qty": q,
+                    "USDT": round(p * q, 4),
+                    "Side": "BUY" if is_buy else "SELL",
                 })
             except:
                 continue
@@ -942,41 +1094,183 @@ elif page == 1:
                 html += f'<td style="padding:3px 8px">{row["Кол-во"]}</td>'
                 html += f'<td style="padding:3px 8px">{row["$"]}</td>'
                 if row["Тип"]:
-                    html += '<td style="padding:3px 8px;color:#00c853">● BUY</td>'
+                    html += '<td style="padding:3px 8px;color:#00e676">● BUY</td>'
                 else:
                     html += '<td style="padding:3px 8px;color:#ff1744">● SELL</td>'
                 html += '</tr>'
             html += '</table>'
             st.markdown(html, unsafe_allow_html=True)
 
-    # ── Export ──
+    # ═══════════════════════════════════════════════
+    # FIX #4: 6 кнопок экспорта
+    # ═══════════════════════════════════════════════
     st.markdown("---")
-    export_data = {}
+    st.markdown("#### 📥 Экспорт данных")
+
     ob_df = pd.DataFrame([
         {"Side": s, "Price": float(p), "Qty": float(q),
-         "$": round(float(p * q), 4)}
+         "USDT": round(float(p * q), 4)}
         for s, data in [("BID", bids), ("ASK", asks)]
         for p, q in data])
-    export_data["orderbook"] = ob_df
-    for lbl, kdf in klines_data.items():
-        if kdf is not None and not kdf.empty:
-            export_data[f"klines_{lbl}"] = kdf
-    def make_zip():
+
+    trades_export_df = pd.DataFrame(trades_df_rows) if trades_df_rows else pd.DataFrame()
+
+    exp_cols = st.columns(3)
+    # 1. Результаты скана CSV
+    scan_results = st.session_state.scan_results
+    if scan_results:
+        scan_exp_rows = []
+        for r in scan_results:
+            if not r.all_walls: continue
+            bt = max(r.bid_walls, key=lambda w: w.size_usdt) if r.bid_walls else None
+            at = max(r.ask_walls, key=lambda w: w.size_usdt) if r.ask_walls else None
+            scan_exp_rows.append({
+                "Score": r.score, "Symbol": r.symbol,
+                "Spread%": round(r.spread_pct, 2),
+                "Vol24h$": round(r.volume_24h_usdt),
+                "Trades24h": r.trade_count_24h,
+                "Trades5m": getattr(r, '_trades_5m', 0),
+                "BID$": round(bt.size_usdt) if bt else 0,
+                "ASK$": round(at.size_usdt) if at else 0,
+            })
+        if scan_exp_rows:
+            with exp_cols[0]:
+                st.download_button(
+                    "📊 Скан CSV",
+                    data=make_csv(pd.DataFrame(scan_exp_rows)),
+                    file_name=f"scan_{datetime.now().strftime('%H%M')}.csv",
+                    mime="text/csv", use_container_width=True)
+    else:
+        with exp_cols[0]:
+            st.caption("Нет скана")
+
+    # 2. Переставки CSV
+    all_movers = st.session_state.tracker.get_active_movers(86400)
+    if all_movers:
+        mr_exp = []
+        for e in all_movers:
+            mr_exp.append({
+                "Time": datetime.fromtimestamp(e.timestamp).strftime("%H:%M:%S"),
+                "Symbol": e.symbol, "Side": e.side,
+                "Volume$": round(e.size_usdt),
+                "OldPrice": e.old_price, "NewPrice": e.new_price,
+                "Shift%": e.shift_pct, "Dir": e.direction,
+            })
+        with exp_cols[1]:
+            st.download_button(
+                "📈 Переставки CSV",
+                data=make_csv(pd.DataFrame(mr_exp)),
+                file_name="movers.csv",
+                mime="text/csv", use_container_width=True)
+    else:
+        with exp_cols[1]:
+            st.caption("Нет переставок")
+
+    # 3. Стакан CSV
+    with exp_cols[2]:
+        st.download_button(
+            "📕 Стакан CSV",
+            data=make_csv(ob_df),
+            file_name=f"{symbol}_orderbook.csv",
+            mime="text/csv", use_container_width=True)
+
+    exp_cols2 = st.columns(3)
+    # 4. Сделки CSV
+    with exp_cols2[0]:
+        if not trades_export_df.empty:
+            st.download_button(
+                "🕐 Сделки CSV",
+                data=make_csv(trades_export_df),
+                file_name=f"{symbol}_trades.csv",
+                mime="text/csv", use_container_width=True)
+        else:
+            st.caption("Нет сделок")
+
+    # 5. ZIP по паре (стакан + сделки + свечи + мета)
+    def make_pair_zip():
         buf = io.BytesIO()
+        import json as _json
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for n, d in export_data.items():
-                zf.writestr(f"{symbol}_{n}.csv",
-                            d.to_csv(index=False))
+            zf.writestr(f"{symbol}_orderbook.csv", ob_df.to_csv(index=False))
+            if not trades_export_df.empty:
+                zf.writestr(f"{symbol}_trades.csv", trades_export_df.to_csv(index=False))
+            for lbl in ["1m", "5m", "1h"]:
+                kdf = klines_data.get(lbl, pd.DataFrame())
+                if kdf is not None and not kdf.empty:
+                    zf.writestr(f"{symbol}_klines_{lbl}.csv", kdf.to_csv(index=False))
+            meta = {
+                "symbol": symbol, "mid_price": mid,
+                "spread_pct": round(spread, 4),
+                "bid_depth_usdt": round(bdepth, 2),
+                "ask_depth_usdt": round(adepth, 2),
+                "trades_24h": tc24, "vol_24h": vol24,
+                "trades_5m": trades_5m_cnt,
+                "exported": datetime.now().isoformat(),
+            }
+            zf.writestr(f"{symbol}_meta.json", _json.dumps(meta, indent=2))
         buf.seek(0)
         return buf.getvalue()
-    st.download_button(
-        f"📦 Скачать {symbol} ZIP", data=make_zip(),
-        file_name=f"{symbol}.zip", mime="application/zip",
-        use_container_width=True)
+
+    with exp_cols2[1]:
+        st.download_button(
+            f"📦 ZIP {symbol}",
+            data=make_pair_zip(),
+            file_name=f"{symbol}_{datetime.now().strftime('%H%M')}.zip",
+            mime="application/zip", use_container_width=True)
+
+    # 6. Скачать ВСЁ (дублируется из сайдбара)
+    with exp_cols2[2]:
+        def _build_full_zip_detail():
+            buf = io.BytesIO()
+            import json as _json
+            trk = st.session_state.tracker
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                # Текущая пара
+                zf.writestr(f"{symbol}_orderbook.csv", ob_df.to_csv(index=False))
+                if not trades_export_df.empty:
+                    zf.writestr(f"{symbol}_trades.csv", trades_export_df.to_csv(index=False))
+                for lbl in ["1m", "5m", "1h", "4h", "1d"]:
+                    kdf = klines_data.get(lbl, pd.DataFrame())
+                    if kdf is not None and not kdf.empty:
+                        zf.writestr(f"{symbol}_klines_{lbl}.csv", kdf.to_csv(index=False))
+                # Скан
+                sr = st.session_state.scan_results
+                if sr:
+                    srows = []
+                    for r in sr:
+                        if not r.all_walls: continue
+                        _bt = max(r.bid_walls, key=lambda w: w.size_usdt) if r.bid_walls else None
+                        _at = max(r.ask_walls, key=lambda w: w.size_usdt) if r.ask_walls else None
+                        srows.append({"Score": r.score, "Symbol": r.symbol,
+                            "Spread%": round(r.spread_pct, 2), "Vol24h$": round(r.volume_24h_usdt),
+                            "Trades24h": r.trade_count_24h, "Trades5m": getattr(r, '_trades_5m', 0),
+                            "BID$": round(_bt.size_usdt) if _bt else 0,
+                            "ASK$": round(_at.size_usdt) if _at else 0})
+                    if srows:
+                        zf.writestr("scan_results.csv", pd.DataFrame(srows).to_csv(index=False))
+                # Переставки
+                mvs = trk.get_active_movers(86400)
+                if mvs:
+                    mrows = [{"Time": datetime.fromtimestamp(e.timestamp).strftime("%Y-%m-%d %H:%M:%S"),
+                              "Symbol": e.symbol, "Side": e.side, "Vol$": round(e.size_usdt),
+                              "Old": e.old_price, "New": e.new_price,
+                              "Shift%": e.shift_pct, "Dir": e.direction} for e in mvs]
+                    zf.writestr("movers.csv", pd.DataFrame(mrows).to_csv(index=False))
+                meta = {"exported": datetime.now().isoformat(),
+                        "current_symbol": symbol,
+                        **trk.get_stats()}
+                zf.writestr("meta.json", _json.dumps(meta, indent=2))
+            buf.seek(0)
+            return buf.getvalue()
+        st.download_button(
+            "📦 ВСЁ ZIP",
+            data=_build_full_zip_detail(),
+            file_name=f"mexc_all_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+            mime="application/zip", use_container_width=True)
 
 
 # ═════════════════════════════════════════════════
-# PAGE 2: 📈 МОНИТОРИНГ ПЕРЕСТАВОК (лог + рейтинг)
+# PAGE 2: 📈 МОНИТОРИНГ ПЕРЕСТАВОК
 # ═════════════════════════════════════════════════
 elif page == 2:
     tracker = st.session_state.tracker
@@ -985,7 +1279,6 @@ elif page == 2:
         "Переставка = стенка которая двигается по стакану. "
         "Признак робота / ММ.")
 
-    # Кнопки-табы внутри страницы
     sub_labels = ["📋 Журнал", "🏆 Рейтинг"]
     if "mover_subtab" not in st.session_state:
         st.session_state.mover_subtab = 0
@@ -999,7 +1292,6 @@ elif page == 2:
     st.markdown("---")
 
     if st.session_state.mover_subtab == 0:
-        # ── Журнал ──
         movers = tracker.get_active_movers(7200)
         if not movers:
             st.info("Нет переставок. Запусти несколько сканов.")
@@ -1033,12 +1325,12 @@ elif page == 2:
                         "→", key="mover_go"):
                     go_detail(chosen_mover)
                     st.rerun()
+            # FIX #4: Кнопка экспорта переставок
             st.download_button(
-                "📥 CSV", data=make_csv(mdf),
+                "📥 Переставки CSV", data=make_csv(mdf),
                 file_name="movers.csv", mime="text/csv")
 
     else:
-        # ── Рейтинг ──
         top_movers = tracker.get_top_movers(20)
         if top_movers:
             for i, (sym, cnt) in enumerate(top_movers):
@@ -1064,4 +1356,4 @@ elif page == 2:
         else:
             st.info("Накопи данные — запусти несколько сканов")
 
-st.caption("MEXC Scanner v5.0")
+st.caption("MEXC Scanner v5.1")
